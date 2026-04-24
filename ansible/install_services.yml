@@ -1,0 +1,474 @@
+---
+# ============================================================
+# install_services.yml
+# ------------------------------------------------------------
+# PURPOSE:
+#   Connects to each server via SSH and installs all software.
+#
+# PLAYS:
+#   Play 1 - all_servers        : Update OS and common tools
+#   Play 2 - build_servers      : Docker + Jenkins
+#   Play 3 - monitoring_servers : Docker + Prometheus + Grafana
+#   Play 4 - k8s_nodes          : Install microk8s
+#   Play 5 - k8s_master         : Enable microk8s add-ons
+#
+# RUN WITH:
+#   ansible-playbook -i inventory.ini install_services.yml
+# ============================================================
+
+
+# ===========================================================
+# PLAY 1 - Update all servers
+# ===========================================================
+- name: "PLAY 1 | Update all servers and install common tools"
+  hosts: all_servers
+  become: true
+  gather_facts: true
+
+  tasks:
+
+    # Wait for SSH to be ready - new EC2 instances need time to boot
+    - name: Wait for SSH connection to be ready
+      wait_for_connection:
+        delay: 15
+        timeout: 300
+
+    # Download latest package list from Ubuntu repos
+    - name: Update apt package cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    # Apply all security patches and bug fixes
+    - name: Upgrade all packages to latest versions
+      apt:
+        upgrade: dist
+        autoremove: yes
+
+    # Install tools every server needs regardless of role
+    - name: Install common system utilities
+      apt:
+        name:
+          - curl
+          - wget
+          - git
+          - unzip
+          - vim
+          - htop
+          - net-tools
+          - ca-certificates
+          - gnupg
+          - lsb-release
+          - python3-pip
+        state: present
+
+
+# ===========================================================
+# PLAY 2 - Build Server: Docker + Jenkins
+# ===========================================================
+- name: "PLAY 2 | Build Server - Install Docker and run Jenkins"
+  hosts: build_servers
+  become: true
+  gather_facts: true
+
+  tasks:
+
+    # -------------------------------------------------------
+    # Install Docker Engine
+    # -------------------------------------------------------
+
+    - name: Add Docker official GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker official apt repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+
+    - name: Install Docker Engine and components
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: yes
+
+    - name: Start Docker service and enable on boot
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Add ubuntu user to docker group
+      user:
+        name: ubuntu
+        groups: docker
+        append: yes
+
+    # -------------------------------------------------------
+    # Prepare Jenkins directory
+    # -------------------------------------------------------
+
+    - name: Create Jenkins working directory
+      file:
+        path: /opt/jenkins
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: "0755"
+
+    - name: Create Jenkins data directory for persistent storage
+      file:
+        path: /opt/jenkins/data
+        state: directory
+        owner: "1000"
+        group: "1000"
+        mode: "0755"
+
+    # -------------------------------------------------------
+    # Write Dockerfile content directly into the server
+    # FIX: using inline content instead of copying local file
+    # so there is zero risk of wrong file being copied
+    # -------------------------------------------------------
+
+    - name: Write Jenkins Dockerfile directly on server
+      copy:
+        dest: /opt/jenkins/Dockerfile
+        owner: ubuntu
+        group: ubuntu
+        mode: "0644"
+        content: |
+          FROM jenkins/jenkins:lts-jdk17
+          USER root
+          RUN apt-get update && apt-get install -y docker.io python3 python3-pip awscli curl git && rm -rf /var/lib/apt/lists/*
+          RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && rm kubectl
+          USER jenkins
+          RUN jenkins-plugin-cli --plugins "workflow-aggregator git github docker-workflow kubernetes credentials credentials-binding pipeline-stage-view blueocean ansible build-timeout timestamper"
+          EXPOSE 8080
+          EXPOSE 50000
+          VOLUME /var/jenkins_home
+
+    # -------------------------------------------------------
+    # Build and run Jenkins container
+    # -------------------------------------------------------
+
+    - name: Build custom Jenkins Docker image
+      community.docker.docker_image:
+        name: custom-jenkins
+        tag: latest
+        build:
+          path: /opt/jenkins
+        source: build
+        force_source: yes
+
+    - name: Stop existing Jenkins container if running
+      community.docker.docker_container:
+        name: jenkins
+        state: absent
+      ignore_errors: yes
+
+    - name: Run Jenkins container
+      community.docker.docker_container:
+        name: jenkins
+        image: custom-jenkins:latest
+        state: started
+        restart_policy: always
+        ports:
+          - "8080:8080"
+          - "50000:50000"
+        volumes:
+          - /opt/jenkins/data:/var/jenkins_home
+        env:
+          JAVA_OPTS: "-Djenkins.install.runSetupWizard=false -Xmx512m"
+
+    - name: Jenkins install complete
+      debug:
+        msg:
+          - "Jenkins is running!"
+          - "URL: http://{{ ansible_host }}:8080"
+          - "Admin password: docker exec jenkins cat /var/jenkins_home/secrets/initialAdminPassword"
+
+
+# ===========================================================
+# PLAY 3 - Monitoring Server: Docker + Prometheus + Grafana
+# ===========================================================
+- name: "PLAY 3 | Monitoring Server - Prometheus and Grafana"
+  hosts: monitoring_servers
+  become: true
+  gather_facts: true
+
+  tasks:
+
+    # -------------------------------------------------------
+    # Install Docker Engine
+    # -------------------------------------------------------
+
+    - name: Add Docker official GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker official apt repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+
+    - name: Install Docker Engine and components
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: yes
+
+    - name: Start Docker service and enable on boot
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Add ubuntu user to docker group
+      user:
+        name: ubuntu
+        groups: docker
+        append: yes
+
+    # -------------------------------------------------------
+    # Create directories
+    # -------------------------------------------------------
+
+    - name: Create monitoring base directory
+      file:
+        path: /opt/monitoring
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: "0755"
+
+    # Prometheus runs as nobody UID 65534 inside container
+    - name: Create Prometheus data directory
+      file:
+        path: /opt/monitoring/prometheus-data
+        state: directory
+        owner: "65534"
+        group: "65534"
+        mode: "0755"
+
+    # Grafana runs as UID 472 inside container
+    - name: Create Grafana data directory
+      file:
+        path: /opt/monitoring/grafana-data
+        state: directory
+        owner: "472"
+        group: "472"
+        mode: "0755"
+
+    # -------------------------------------------------------
+    # Prometheus config
+    # hostvars reads IPs directly from inventory.ini
+    # -------------------------------------------------------
+
+    - name: Create Prometheus configuration file
+      copy:
+        dest: /opt/monitoring/prometheus.yml
+        owner: ubuntu
+        group: ubuntu
+        mode: "0644"
+        content: |
+          global:
+            scrape_interval: 15s
+            evaluation_interval: 15s
+
+          scrape_configs:
+
+            - job_name: 'prometheus'
+              static_configs:
+                - targets: ['localhost:9090']
+
+            - job_name: 'build_server'
+              static_configs:
+                - targets: ['{{ hostvars["build_server"]["ansible_host"] }}:9100']
+
+            - job_name: 'monitoring_server'
+              static_configs:
+                - targets: ['localhost:9100']
+
+            - job_name: 'k8s_master'
+              static_configs:
+                - targets: ['{{ hostvars["k8s_master"]["ansible_host"] }}:9100']
+
+            - job_name: 'k8s_workers'
+              static_configs:
+                - targets:
+                    - '{{ hostvars["k8s_worker1"]["ansible_host"] }}:9100'
+                    - '{{ hostvars["k8s_worker2"]["ansible_host"] }}:9100'
+
+    # -------------------------------------------------------
+    # Run Prometheus container
+    # -------------------------------------------------------
+
+    - name: Stop existing Prometheus container if running
+      community.docker.docker_container:
+        name: prometheus
+        state: absent
+      ignore_errors: yes
+
+    - name: Run Prometheus container
+      community.docker.docker_container:
+        name: prometheus
+        image: prom/prometheus:latest
+        state: started
+        restart_policy: always
+        ports:
+          - "9090:9090"
+        volumes:
+          - /opt/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+          - /opt/monitoring/prometheus-data:/prometheus
+        command:
+          - "--config.file=/etc/prometheus/prometheus.yml"
+          - "--storage.tsdb.path=/prometheus"
+          - "--storage.tsdb.retention.time=15d"
+          - "--web.enable-lifecycle"
+
+    # -------------------------------------------------------
+    # Run Grafana container
+    # FIX: removed GF_SERVER_ROOT_URL so Grafana is accessible
+    # directly at http://IP:3000 without any path redirect
+    # -------------------------------------------------------
+
+    - name: Stop existing Grafana container if running
+      community.docker.docker_container:
+        name: grafana
+        state: absent
+      ignore_errors: yes
+
+    - name: Run Grafana container
+      community.docker.docker_container:
+        name: grafana
+        image: grafana/grafana:latest
+        state: started
+        restart_policy: always
+        ports:
+          - "3000:3000"
+        volumes:
+          - /opt/monitoring/grafana-data:/var/lib/grafana
+        env:
+          GF_SECURITY_ADMIN_USER: "admin"
+          GF_SECURITY_ADMIN_PASSWORD: "admin123"
+          GF_USERS_ALLOW_SIGN_UP: "false"
+
+    - name: Monitoring install complete
+      debug:
+        msg:
+          - "Monitoring is running!"
+          - "Grafana:    http://{{ ansible_host }}:3000  login: admin / admin123"
+          - "Prometheus: http://{{ ansible_host }}:9090"
+
+
+# ===========================================================
+# PLAY 4 - Install microk8s on all Kubernetes nodes
+# ===========================================================
+- name: "PLAY 4 | Install microk8s on all Kubernetes nodes"
+  hosts: k8s_nodes
+  become: true
+  gather_facts: true
+
+  tasks:
+
+    - name: Install snapd package manager
+      apt:
+        name: snapd
+        state: present
+
+    - name: Start snapd service and enable on boot
+      systemd:
+        name: snapd
+        state: started
+        enabled: yes
+
+    # classic confinement gives microk8s full system access it needs
+    - name: Install microk8s via snap
+      snap:
+        name: microk8s
+        classic: yes
+        channel: "1.28/stable"
+
+    # Without this ubuntu user needs sudo to run microk8s commands
+    - name: Add ubuntu user to microk8s group
+      user:
+        name: ubuntu
+        groups: microk8s
+        append: yes
+
+    # microk8s takes 1-3 minutes to initialise after install
+    - name: Wait for microk8s to become ready
+      command: microk8s status --wait-ready
+      retries: 15
+      delay: 20
+      register: mk8s_ready
+      until: mk8s_ready.rc == 0
+
+    # Lets you type kubectl instead of microk8s kubectl
+    - name: Create kubectl shortcut alias
+      command: snap alias microk8s.kubectl kubectl
+      args:
+        creates: /snap/bin/kubectl
+
+    - name: Verify microk8s installed correctly
+      command: microk8s version
+      register: mk8s_version
+
+    - name: Display microk8s version
+      debug:
+        msg: "microk8s installed: {{ mk8s_version.stdout }}"
+
+
+# ===========================================================
+# PLAY 5 - Enable microk8s add-ons on Master only
+# ===========================================================
+- name: "PLAY 5 | Enable microk8s add-ons on Master Node"
+  hosts: k8s_master
+  become: true
+
+  tasks:
+
+    # DNS lets pods find each other by name not IP
+    # Required for almost all Kubernetes apps to work
+    - name: Enable DNS add-on
+      command: microk8s enable dns
+      register: dns_result
+      changed_when: "'already enabled' not in dns_result.stdout"
+
+    # Storage lets apps save data that survives pod restarts
+    - name: Enable storage add-on
+      command: microk8s enable storage
+      register: storage_result
+      changed_when: "'already enabled' not in storage_result.stdout"
+
+    # Dashboard gives a visual web UI to manage the cluster
+    - name: Enable dashboard add-on
+      command: microk8s enable dashboard
+      register: dashboard_result
+      changed_when: "'already enabled' not in dashboard_result.stdout"
+
+    # Ingress allows external HTTP traffic into the cluster
+    - name: Enable ingress add-on
+      command: microk8s enable ingress
+      register: ingress_result
+      changed_when: "'already enabled' not in ingress_result.stdout"
+
+    - name: Get microk8s status
+      command: microk8s status
+      register: mk8s_status
+
+    - name: Display microk8s status
+      debug:
+        msg: "{{ mk8s_status.stdout_lines }}"

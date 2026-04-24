@@ -1,0 +1,68 @@
+##############################################################################
+# TERRAFORM
+##############################################################################
+# Local .terraform folder (Contains binary plugins and modules)
+.terraform/
+
+# Terraform lock file (Safe to commit if you want to pin provider versions)
+.terraform.lock.hcl
+
+# State files (CRITICAL: Contains sensitive infrastructure data and secrets)
+*.tfstate
+*.tfstate.*
+*.tfstate.lock.info
+
+# Variable files (Often contain Access Keys, Secret Keys, and Passwords)
+*.tfvars
+*.tfvars.json
+
+# Override files (Local-specific configurations)
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Log files
+terraform.log
+
+##############################################################################
+# ANSIBLE
+##############################################################################
+# Retry files (Generated when a playbook fails)
+*.retry
+
+# Log files
+ansible.log
+
+# External roles (Roles downloaded via ansible-galaxy)
+roles/galaxy/
+
+# Sensitive Vault & Password files
+.vault_pass
+*vault*.yml
+!example-vault.yml
+
+# SSH Private Keys (HIGH SECURITY RISK: Never commit these to version control)
+*.pem
+*.key
+my-key*
+aws*-key*
+aws*v*
+
+# Temporary and Cache files
+*.tmp
+
+##############################################################################
+# IDE & SYSTEM SPECIFIC
+##############################################################################
+# Visual Studio Code
+.vscode/
+
+# JetBrains IDEs (IntelliJ, PyCharm, etc.)
+.idea/
+
+# macOS Metadata files
+.DS_Store
+
+# Linux temporary/backup files
+*~

@@ -1,0 +1,200 @@
+# ============================================================
+# Dockerfile.monitoring
+# ------------------------------------------------------------
+# PURPOSE:
+#   Builds a Docker image that runs BOTH Prometheus and Grafana
+#   inside a single container, managed by Supervisord.
+#
+# WHAT IS INSIDE:
+#   ┌─────────────────────────────────────────┐
+#   │  Docker Container                       │
+#   │  ┌─────────────┐  ┌──────────────────┐  │
+#   │  │ Supervisord │  │                  │  │
+#   │  │ (manager)   │→ │ Prometheus :9090 │  │
+#   │  │             │→ │ Grafana    :3000 │  │
+#   │  └─────────────┘  └──────────────────┘  │
+#   └─────────────────────────────────────────┘
+#
+# WHAT IS SUPERVISORD?
+#   Normally Docker containers run ONE process.
+#   Supervisord is a process manager that lets us run MULTIPLE
+#   processes inside one container. If one crashes, it restarts it.
+#
+# ALTERNATIVE:
+#   The Ansible playbook (install_services.yml) runs Prometheus
+#   and Grafana as SEPARATE containers, which is the recommended
+#   approach for production. This Dockerfile is the all-in-one
+#   option for simplicity and completeness.
+#
+# PORTS:
+#   9090 = Prometheus web UI and API
+#   3000 = Grafana dashboard UI
+#
+# HOW TO BUILD:
+#   docker build -t custom-monitoring:latest .
+#
+# HOW TO RUN:
+#   docker run -d \
+#     -p 9090:9090 \
+#     -p 3000:3000 \
+#     -v prometheus-data:/var/lib/prometheus \
+#     -v grafana-data:/var/lib/grafana \
+#     --name monitoring \
+#     custom-monitoring:latest
+# ============================================================
+
+# -------------------------------------------------------
+# Base Image
+# -------------------------------------------------------
+# Ubuntu 22.04 LTS — clean, stable, well-supported base
+FROM ubuntu:22.04
+
+# -------------------------------------------------------
+# Environment Variables
+# -------------------------------------------------------
+# Prevent apt from asking interactive questions during build
+# (e.g. timezone selection dialogs)
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Version pins — update these to get newer releases
+ENV PROMETHEUS_VERSION=2.48.0
+ENV GRAFANA_VERSION=10.2.2
+
+# -------------------------------------------------------
+# Install system dependencies
+# -------------------------------------------------------
+RUN apt-get update && apt-get install -y \
+    # supervisor = process manager (runs both Prometheus + Grafana)
+    supervisor \
+    # wget, curl = download tools for fetching binaries
+    wget \
+    curl \
+    # Required by Grafana
+    adduser \
+    libfontconfig1 \
+    musl \
+    && rm -rf /var/lib/apt/lists/*
+
+# -------------------------------------------------------
+# Install Prometheus
+# -------------------------------------------------------
+# Prometheus doesn't have an apt package in Ubuntu's default repos.
+# We download the pre-compiled binary from GitHub releases.
+
+RUN wget -q \
+    https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz \
+    -O /tmp/prometheus.tar.gz \
+    # Extract the archive
+    && tar -xzf /tmp/prometheus.tar.gz -C /tmp/ \
+    # Move binaries to system path so they can be run from anywhere
+    && mv /tmp/prometheus-${PROMETHEUS_VERSION}.linux-amd64/prometheus /usr/local/bin/prometheus \
+    && mv /tmp/prometheus-${PROMETHEUS_VERSION}.linux-amd64/promtool /usr/local/bin/promtool \
+    # Create directories for config and data
+    && mkdir -p /etc/prometheus /var/lib/prometheus \
+    # Copy console libraries (used by Prometheus web UI)
+    && mv /tmp/prometheus-${PROMETHEUS_VERSION}.linux-amd64/consoles /etc/prometheus/ \
+    && mv /tmp/prometheus-${PROMETHEUS_VERSION}.linux-amd64/console_libraries /etc/prometheus/ \
+    # Clean up downloaded files to reduce image size
+    && rm -rf /tmp/prometheus*
+
+# Write the default Prometheus configuration file.
+# This is a minimal config — Ansible overwrites this with the real one.
+RUN cat > /etc/prometheus/prometheus.yml << 'EOF'
+# Prometheus default configuration
+global:
+  scrape_interval: 15s        # How often to collect metrics
+  evaluation_interval: 15s    # How often to evaluate alerting rules
+
+scrape_configs:
+  # Prometheus monitors itself by default
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+EOF
+
+# -------------------------------------------------------
+# Install Grafana
+# -------------------------------------------------------
+# Grafana provides an official apt repository for Ubuntu.
+
+RUN wget -q -O /usr/share/keyrings/grafana.key https://apt.grafana.com/gpg.key \
+    # Add the Grafana repository to apt's sources list
+    && echo "deb [signed-by=/usr/share/keyrings/grafana.key] https://apt.grafana.com stable main" \
+       > /etc/apt/sources.list.d/grafana.list \
+    && apt-get update \
+    && apt-get install -y grafana \
+    && rm -rf /var/lib/apt/lists/*
+
+# Configure Grafana defaults (uncomment and set values in grafana.ini)
+RUN sed -i 's/;admin_user = admin/admin_user = admin/' /etc/grafana/grafana.ini \
+    && sed -i 's/;admin_password = admin/admin_password = admin123/' /etc/grafana/grafana.ini \
+    && sed -i 's/;allow_sign_up = true/allow_sign_up = false/' /etc/grafana/grafana.ini
+
+# -------------------------------------------------------
+# Supervisord Configuration
+# -------------------------------------------------------
+# Create the supervisor config directory and write the config file.
+# Each [program:name] block defines one service supervisord manages.
+RUN mkdir -p /etc/supervisor/conf.d /var/log/supervisor
+
+RUN cat > /etc/supervisor/conf.d/monitoring.conf << 'EOF'
+[supervisord]
+nodaemon=true                           ; Run in foreground (required in Docker)
+logfile=/var/log/supervisor/supervisord.log
+pidfile=/var/run/supervisord.pid
+
+[program:prometheus]
+; Command to start Prometheus
+command=/usr/local/bin/prometheus \
+    --config.file=/etc/prometheus/prometheus.yml \
+    --storage.tsdb.path=/var/lib/prometheus \
+    --storage.tsdb.retention.time=15d \
+    --web.listen-address=0.0.0.0:9090
+autostart=true        ; Start Prometheus when supervisord starts
+autorestart=true      ; Restart Prometheus if it crashes
+startretries=3        ; Try 3 times before giving up
+stderr_logfile=/var/log/prometheus.err.log
+stdout_logfile=/var/log/prometheus.out.log
+user=nobody           ; Run as non-root for security
+
+[program:grafana]
+; Command to start Grafana
+command=/usr/sbin/grafana-server \
+    --config=/etc/grafana/grafana.ini \
+    --homepath=/usr/share/grafana \
+    --packaging=deb
+autostart=true
+autorestart=true
+startretries=3
+stderr_logfile=/var/log/grafana.err.log
+stdout_logfile=/var/log/grafana.out.log
+user=grafana          ; Run as the grafana user (created during installation)
+EOF
+
+# -------------------------------------------------------
+# Create required directories with correct ownership
+# -------------------------------------------------------
+RUN mkdir -p /var/lib/prometheus \
+    && chown -R nobody:nogroup /var/lib/prometheus \
+    && mkdir -p /var/lib/grafana \
+    && chown -R grafana:grafana /var/lib/grafana
+
+# -------------------------------------------------------
+# Expose ports
+# -------------------------------------------------------
+EXPOSE 9090   # Prometheus
+EXPOSE 3000   # Grafana
+
+# -------------------------------------------------------
+# Volumes for data persistence
+# -------------------------------------------------------
+# Mounting these directories as volumes means data survives
+# container restarts and can be backed up independently.
+VOLUME ["/var/lib/prometheus", "/var/lib/grafana", "/etc/prometheus"]
+
+# -------------------------------------------------------
+# Start command
+# -------------------------------------------------------
+# When the container starts, supervisord runs and manages
+# both Prometheus and Grafana.
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/supervisord.conf"]

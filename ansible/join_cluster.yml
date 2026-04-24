@@ -1,0 +1,204 @@
+---
+# ============================================================
+# join_cluster.yml
+# ------------------------------------------------------------
+# PURPOSE:
+#   Forms the Kubernetes cluster by joining worker nodes
+#   to the master node.
+#
+# HOW IT WORKS:
+#   1. Master generates a one-time join token
+#   2. Worker 1 uses that token to join
+#   3. Master generates a NEW token (each token is single use)
+#   4. Worker 2 uses the new token to join
+#   5. Verify all nodes show as Ready
+#
+# RUN WITH:
+#   ansible-playbook -i inventory.ini join_cluster.yml
+# ============================================================
+
+
+# ===========================================================
+# PLAY 1 - Generate join token for Worker 1 on Master
+# ===========================================================
+- name: "PLAY 1 | Generate join token for Worker 1"
+  hosts: k8s_master
+  become: true
+  gather_facts: true
+
+  tasks:
+
+    - name: Check microk8s is running on master
+      command: microk8s status --wait-ready
+      retries: 10
+      delay: 15
+      register: master_ready
+      until: master_ready.rc == 0
+
+    - name: Display master status
+      debug:
+        msg: "{{ master_ready.stdout_lines }}"
+
+    # add-node generates a join command like:
+    # microk8s join 10.0.1.5:25000/TOKEN/FINGERPRINT
+    # --format short gives just the command with no extra text
+    - name: Generate join token for Worker 1
+      command: microk8s add-node --format short
+      register: join_cmd_w1
+
+    - name: Show join command for Worker 1
+      debug:
+        msg: "Worker 1 join command: {{ join_cmd_w1.stdout_lines[0] }}"
+
+    # Store the command so Worker 1 play can read it
+    - name: Save Worker 1 join command as fact
+      set_fact:
+        join_command_w1: "{{ join_cmd_w1.stdout_lines[0] }}"
+        cacheable: yes
+
+
+# ===========================================================
+# PLAY 2 - Worker 1 joins the cluster
+# ===========================================================
+- name: "PLAY 2 | Worker 1 joins the cluster"
+  hosts: k8s_worker1
+  become: true
+  gather_facts: true
+
+  tasks:
+
+    - name: Check if Worker 1 already joined
+      command: microk8s status
+      register: w1_status
+      changed_when: false
+
+    - name: Show Worker 1 current status
+      debug:
+        msg: "{{ w1_status.stdout_lines }}"
+
+    # Only run join if not already part of a cluster
+    - name: Worker 1 runs join command
+      command: "{{ hostvars['k8s_master']['join_command_w1'] }}"
+      when: "'microk8s is not running' in w1_status.stdout or 'ha-cluster' not in w1_status.stdout"
+      register: w1_join
+      ignore_errors: yes
+
+    - name: Show Worker 1 join result
+      debug:
+        msg: "{{ w1_join.stdout_lines | default(['Skipped or already joined']) }}"
+
+    # Give the node time to register with the master
+    - name: Wait 30 seconds for Worker 1 to register
+      pause:
+        seconds: 30
+
+
+# ===========================================================
+# PLAY 3 - Generate NEW token for Worker 2 on Master
+# ===========================================================
+# IMPORTANT: Tokens are single use. Must generate a new one.
+- name: "PLAY 3 | Generate new join token for Worker 2"
+  hosts: k8s_master
+  become: true
+
+  tasks:
+
+    - name: Generate fresh join token for Worker 2
+      command: microk8s add-node --format short
+      register: join_cmd_w2
+
+    - name: Show join command for Worker 2
+      debug:
+        msg: "Worker 2 join command: {{ join_cmd_w2.stdout_lines[0] }}"
+
+    - name: Save Worker 2 join command as fact
+      set_fact:
+        join_command_w2: "{{ join_cmd_w2.stdout_lines[0] }}"
+        cacheable: yes
+
+
+# ===========================================================
+# PLAY 4 - Worker 2 joins the cluster
+# ===========================================================
+- name: "PLAY 4 | Worker 2 joins the cluster"
+  hosts: k8s_worker2
+  become: true
+  gather_facts: true
+
+  tasks:
+
+    - name: Check if Worker 2 already joined
+      command: microk8s status
+      register: w2_status
+      changed_when: false
+
+    - name: Show Worker 2 current status
+      debug:
+        msg: "{{ w2_status.stdout_lines }}"
+
+    - name: Worker 2 runs join command
+      command: "{{ hostvars['k8s_master']['join_command_w2'] }}"
+      when: "'microk8s is not running' in w2_status.stdout or 'ha-cluster' not in w2_status.stdout"
+      register: w2_join
+      ignore_errors: yes
+
+    - name: Show Worker 2 join result
+      debug:
+        msg: "{{ w2_join.stdout_lines | default(['Skipped or already joined']) }}"
+
+    - name: Wait 30 seconds for Worker 2 to register
+      pause:
+        seconds: 30
+
+
+# ===========================================================
+# PLAY 5 - Verify cluster from Master
+# ===========================================================
+- name: "PLAY 5 | Verify the Kubernetes cluster"
+  hosts: k8s_master
+  become: true
+
+  tasks:
+
+    # Give all nodes extra time to reach Ready state
+    - name: Wait 60 seconds for all nodes to stabilise
+      pause:
+        seconds: 60
+
+    - name: Get all cluster nodes
+      command: microk8s kubectl get nodes -o wide
+      register: all_nodes
+
+    - name: Display all nodes
+      debug:
+        msg: "{{ all_nodes.stdout_lines }}"
+
+    - name: Get all pods across all namespaces
+      command: microk8s kubectl get pods --all-namespaces
+      register: all_pods
+
+    - name: Display all pods
+      debug:
+        msg: "{{ all_pods.stdout_lines }}"
+
+    # Count how many nodes are Ready
+    # This is informational only - does not fail the playbook
+    - name: Count Ready nodes
+      shell: microk8s kubectl get nodes --no-headers | grep -c Ready
+      register: ready_count
+      ignore_errors: yes
+
+    - name: Show cluster summary
+      debug:
+        msg:
+          - "====================================="
+          - "Cluster setup complete!"
+          - "Ready nodes: {{ ready_count.stdout | default('unknown') }} of 3"
+          - "====================================="
+          - "Master:  {{ hostvars['k8s_master']['ansible_host'] }}"
+          - "Worker1: {{ hostvars['k8s_worker1']['ansible_host'] }}"
+          - "Worker2: {{ hostvars['k8s_worker2']['ansible_host'] }}"
+          - "====================================="
+          - "To check: ssh into master then run:"
+          - "microk8s kubectl get nodes"
+          - "====================================="
