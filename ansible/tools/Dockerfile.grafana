@@ -1,0 +1,24 @@
+# ==============================================================================
+# Dockerfile.grafana - Grafana with Prometheus datasource pre-configured
+# ==============================================================================
+FROM grafana/grafana:10.4.0
+
+# Switch to root to provision datasources
+USER root
+
+# Create provisioning directories
+RUN mkdir -p /etc/grafana/provisioning/datasources
+RUN mkdir -p /etc/grafana/provisioning/dashboards
+
+# Pre-configure Prometheus as default datasource
+COPY datasources.yml /etc/grafana/provisioning/datasources/datasources.yml
+
+# Optional: Pre-load dashboards
+# COPY dashboards.yml /etc/grafana/provisioning/dashboards/dashboards.yml
+# COPY *.json /var/lib/grafana/dashboards/
+
+# Switch back to grafana user
+USER grafana
+
+# Expose Grafana default port
+EXPOSE 3000

@@ -1,85 +1,58 @@
-# ============================================================
-# vpc.tf
-# ------------------------------------------------------------
-# PURPOSE:
-#   Creates the complete networking layer for this project.
-#
-# WHY TWO SUBNETS?
-#   AWS ALB requires at least 2 subnets in 2 different
-#   Availability Zones. All EC2 instances live in subnet_1.
-#   Subnet_2 exists only to satisfy the ALB requirement.
-# ============================================================
+# ==============================================================================
+# vpc.tf - Creates isolated networking: VPC, Subnets, IGW, Route Table
+# - Ensures EC2 instances are in a public network with internet access
+# - Includes 2 subnets in different AZs to satisfy AWS Load Balancer HA requirements
+# ==============================================================================
 
-
-# -------------------------------------------------------
-# 1. VPC — the isolated private network
-# -------------------------------------------------------
 resource "aws_vpc" "main" {
-  cidr_block           = var.vpc_cidr
-  enable_dns_support   = true
+  cidr_block           = "10.0.0.0/16"
   enable_dns_hostnames = true
+  enable_dns_support   = true
 
   tags = {
-    Name        = "${var.project_name}-vpc"
-    Project     = var.project_name
-    Environment = var.environment
+    Name = "${var.project_prefix}-vpc"
   }
 }
 
-
-# -------------------------------------------------------
-# 2. Public Subnet 1 — ap-southeast-1a
-#    All 5 EC2 instances are launched in this subnet
-# -------------------------------------------------------
-resource "aws_subnet" "public_1" {
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = var.public_subnet_cidr
-  availability_zone       = "ap-southeast-1a"
-  map_public_ip_on_launch = true
-
-  tags = {
-    Name        = "${var.project_name}-public-subnet-1a"
-    Project     = var.project_name
-    Environment = var.environment
-  }
-}
-
-
-# -------------------------------------------------------
-# 3. Public Subnet 2 — ap-southeast-1b
-#    Only used by the ALB — no EC2 instances here
-# -------------------------------------------------------
-resource "aws_subnet" "public_2" {
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = var.public_subnet_2_cidr
-  availability_zone       = "ap-southeast-1b"
-  map_public_ip_on_launch = true
-
-  tags = {
-    Name        = "${var.project_name}-public-subnet-1b"
-    Project     = var.project_name
-    Environment = var.environment
-  }
-}
-
-
-# -------------------------------------------------------
-# 4. Internet Gateway — connects VPC to the internet
-# -------------------------------------------------------
 resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
 
   tags = {
-    Name        = "${var.project_name}-igw"
-    Project     = var.project_name
-    Environment = var.environment
+    Name = "${var.project_prefix}-igw"
   }
 }
 
+# ==============================================================================
+# Primary Public Subnet (Availability Zone A)
+# ==============================================================================
+resource "aws_subnet" "public" {
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = "10.0.1.0/24"
+  availability_zone       = "${var.aws_region}a"
+  map_public_ip_on_launch = true # Critical for public IP assignment
 
-# -------------------------------------------------------
-# 5. Route Table — sends all traffic to internet gateway
-# -------------------------------------------------------
+  tags = {
+    Name = "${var.project_prefix}-public-subnet-a"
+  }
+}
+
+# ==============================================================================
+# Secondary Public Subnet (Availability Zone B) - Required for ALB
+# ==============================================================================
+resource "aws_subnet" "public_b" {
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = "10.0.2.0/24"
+  availability_zone       = "${var.aws_region}b"
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name = "${var.project_prefix}-public-subnet-b"
+  }
+}
+
+# ==============================================================================
+# Route Table for Public Subnets
+# ==============================================================================
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.main.id
 
@@ -89,24 +62,19 @@ resource "aws_route_table" "public" {
   }
 
   tags = {
-    Name        = "${var.project_name}-public-rt"
-    Project     = var.project_name
-    Environment = var.environment
+    Name = "${var.project_prefix}-rt-public"
   }
 }
 
-
-# -------------------------------------------------------
-# 6. Route Table Associations
-#    Both subnets must use the public route table
-#    so instances and the ALB can reach the internet
-# -------------------------------------------------------
-resource "aws_route_table_association" "public_1" {
-  subnet_id      = aws_subnet.public_1.id
+# ==============================================================================
+# Associate Route Table with Subnets
+# ==============================================================================
+resource "aws_route_table_association" "public" {
+  subnet_id      = aws_subnet.public.id
   route_table_id = aws_route_table.public.id
 }
 
-resource "aws_route_table_association" "public_2" {
-  subnet_id      = aws_subnet.public_2.id
+resource "aws_route_table_association" "public_b" {
+  subnet_id      = aws_subnet.public_b.id
   route_table_id = aws_route_table.public.id
 }

@@ -1,97 +1,24 @@
+# ==============================================================================
+# cleanup.yml - Stops containers & removes MicroK8s safely
+# ==============================================================================
 ---
-- name: God Mode K8s & AWS Resource Wipe
+- name: Cleanup Services
   hosts: all
-  become: true
-  vars:
-    # Set this to your region
-    aws_region: "ap-southeast-1"
-  
+  become: yes
   tasks:
-    # -------------------------------------------------------------------------
-    # LAYER 1: THE KUBERNETES LAYER (Soft Cleanup)
-    # -------------------------------------------------------------------------
-    - name: 🛡️ [K8S] Force delete all Services and PVCs (The Money Savers)
-      shell: |
-        /snap/bin/microk8s kubectl delete service --all --all-namespaces --force --grace-period=0
-        /snap/bin/microk8s kubectl delete pvc --all --all-namespaces --force --grace-period=0
-      ignore_errors: true
-
-    - name: 🛡️ [K8S] Delete all LoadBalancer type services specifically
-      shell: |
-        /snap/bin/microk8s kubectl get svc --all-namespaces -o json | \
-        jq -r '.items[] | select(.spec.type=="LoadBalancer") | .metadata.name' | \
-        xargs -I {} /snap/bin/microk8s kubectl delete svc {}
-      ignore_errors: true
-
-    # -------------------------------------------------------------------------
-    # LAYER 2: THE AWS CLI LAYER (Hunting Ghost Resources)
-    # -------------------------------------------------------------------------
-    - name: 🏹 [AWS] Seek and Destroy orphaned Load Balancers
-      shell: |
-        # Find LBs that contain the cluster name or are 'leaking'
-        LBS=$(aws elb describe-load-balancers --region {{ aws_region }} --query 'LoadBalancerDescriptions[*].LoadBalancerName' --output text)
-        for lb in $LBS; do
-          aws elb delete-load-balancer --load-balancer-name $lb --region {{ aws_region }}
-        done
-      ignore_errors: true
-      delegate_to: localhost
-      run_once: true
-      become: false
-
-    - name: 🏹 [AWS] Force detach and delete 'Available' EBS Volumes
-      shell: |
-        VOLS=$(aws ec2 describe-volumes --region {{ aws_region }} --filters Name=status,Values=available --query 'Volumes[*].VolumeId' --output text)
-        for vol in $VOLS; do
-          aws ec2 delete-volume --volume-id $vol --region {{ aws_region }}
-        done
-      ignore_errors: true
-      delegate_to: localhost
-      run_once: true
-      become: false
-
-    # -------------------------------------------------------------------------
-    # LAYER 3: THE OPERATING SYSTEM LAYER (Deep Wipe)
-    # -------------------------------------------------------------------------
-    - name: 🛠️ [OS] Stop and Purge MicroK8s
-      shell: |
-        microk8s stop
-        snap remove microk8s --purge
-      ignore_errors: true
-
-    - name: 🛠️ [OS] Kill all remaining Containerd/Docker processes
-      shell: |
-        pkill -9 -f containerd || true
-        pkill -9 -f docker || true
-      ignore_errors: true
-
-    - name: 🛠️ [OS] Nuclear Networking Reset
-      shell: |
-        # Remove every virtual interface created by K8s/CNI
-        for intf in cni0 flannel.1 cali0 vxlan.calico; do
-          ip link delete $intf || true
-        done
-        # Wipe IPTables completely
-        iptables -P INPUT ACCEPT
-        iptables -P FORWARD ACCEPT
-        iptables -P OUTPUT ACCEPT
-        iptables -t nat -F
-        iptables -t mangle -F
-        iptables -F
-        iptables -X
-      ignore_errors: true
-
-    - name: 🛠️ [OS] Final Folder Shredding
-      file:
-        path: "{{ item }}"
+    - name: Stop & Remove all Docker containers
+      docker_container:
+        name: "{{ item }}"
         state: absent
-      loop:
-        - /var/snap/microk8s
-        - /var/lib/cni/
-        - /var/lib/kubelet/
-        - /etc/cni/
-        - /root/.kube
-        - "/home/{{ ansible_user | default('ubuntu') }}/.kube"
+        force_kill: true
+      loop: [jenkins, grafana, prometheus]
 
-    - name: 🏁 God Mode Status
-      debug:
-        msg: "The servers are now 'Naked'. No K8s, No ELBs, No Ghost Volumes. Safe for Terraform Destroy."
+    - name: Remove Docker volumes
+      docker_volume:
+        name: "{{ item }}"
+        state: absent
+      loop: [jenkins_home, prometheus_data]
+
+    - name: Remove MicroK8s
+      command: snap remove microk8s --purge
+      failed_when: false
