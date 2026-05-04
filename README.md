@@ -1,5 +1,12 @@
 # 🚀 AWS Kubernetes Infrastructure v2 — Terraform + Ansible
 
+[![Terraform](https://img.shields.io/badge/Terraform-1.3%2B-7B42BC?style=for-the-badge&logo=terraform&logoColor=white)](https://www.terraform.io/)
+[![Ansible](https://img.shields.io/badge/Ansible-2.14%2B-EE0000?style=for-the-badge&logo=ansible&logoColor=white)](https://www.ansible.com/)
+[![AWS](https://img.shields.io/badge/AWS-ap--southeast--1-FF9900?style=for-the-badge&logo=amazon-aws&logoColor=white)](https://aws.amazon.com/)
+[![MicroK8s](https://img.shields.io/badge/MicroK8s-1.28-E95420?style=for-the-badge&logo=ubuntu&logoColor=white)](https://microk8s.io/)
+[![Jenkins](https://img.shields.io/badge/Jenkins-LTS-D33833?style=for-the-badge&logo=jenkins&logoColor=white)](https://www.jenkins.io/)
+[![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
+
 > **What this project does in one sentence:** Run a single script and it automatically builds a complete cloud environment on AWS — 5 servers, a load balancer, a Kubernetes cluster, a Jenkins CI/CD pipeline, and a Grafana monitoring dashboard — all from code.
 
 ---
