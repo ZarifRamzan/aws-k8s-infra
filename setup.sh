@@ -14,7 +14,7 @@ if command -v aws >/dev/null && aws --version 2>&1 | grep -q "aws-cli/2"; then
     echo "✅ Updated: $(aws --version)"
 else
     curl -sL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o aws.zip
-    unzip -q aws.zip && sudo ./aws/install && rm -rf aws aws.zip
+    unzip -q -o aws.zip && sudo ./aws/install && rm -rf aws aws.zip
     echo "✅ Installed: $(aws --version)"
 fi
 
