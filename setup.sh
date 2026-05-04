@@ -180,12 +180,6 @@ run_terraform_full() {
     if bash "$SCRIPT_DIR/terraform/terraform_run.sh"; then
         print_success "✅ Full deployment completed successfully!"
         echo ""
-        echo "📊 Access your services:"
-        echo "   Jenkins    : http://<BUILD_IP>:8080"
-        echo "   Grafana    : http://<MONITOR_IP>:3000 (admin/admin123)"
-        echo "   Prometheus : http://<MONITOR_IP>:9090"
-        echo "   K8s Master : ssh -i ~/.ssh/*.pem ubuntu@<MASTER_IP>"
-        echo ""
         echo "💡 Tip: Run 'terraform/terraform_destroy.sh' to clean up"
     else
         print_error "❌ Deployment failed. Check logs above"
